@@ -1,33 +1,59 @@
 package main
 
 import (
-	"flag"
 	"laplace/core"
-	"log"
-	"math/rand"
-	"net/http"
+	"context"
+	"os"
+	"os/signal"
 	"time"
+
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"golang.org/x/crypto/acme/autocert"
+
 )
 
+const HOST = "share.zig.show"
+
 func main() {
-	addr := flag.String("addr", "0.0.0.0:443", "Listen address")
-	tls := flag.Bool("tls", true, "Use TLS")
-	certFile := flag.String("certFile", "files/server.crt", "TLS cert file")
-	keyFile := flag.String("keyFile", "files/server.key", "TLS key file")
-	flag.Parse()
+	e := echo.New()
+	e.Pre(middleware.HTTPSNonWWWRedirect())
+	e.Use(middleware.RateLimiter(middleware.NewRateLimiterMemoryStore(20)))
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+	e.Use(middleware.BodyLimit("4K"))
+	e.Use(middleware.Gzip())
 
-	rand.Seed(time.Now().UnixNano())
-	server := core.GetHttp()
+	e.AutoTLSManager.HostPolicy = autocert.HostWhitelist(HOST)
+	e.AutoTLSManager.Cache = autocert.DirCache(".cache")
+	e.HideBanner = true
 
-	if *tls {
-		log.Println("Listening on TLS:", *addr)
-		if err := http.ListenAndServeTLS(*addr, *certFile, *keyFile, server); err != nil {
-			log.Fatalln(err)
-		}
-	} else {
-		log.Println("Listening:", *addr)
-		if err := http.ListenAndServe(*addr, server); err != nil {
-			log.Fatalln(err)
-		}
+	laplaceServer := core.GetHttp()
+	
+	e.Any("/*", echo.WrapHandler(laplaceServer))
+
+	println("Listening to ports 80 and 443")
+	go e.StartAutoTLS(HOST + ":" + "443")
+	e80 := echo.New()
+	e80.Pre(middleware.HTTPSNonWWWRedirect())
+	e80.Use(middleware.RateLimiter(middleware.NewRateLimiterMemoryStore(20)))
+	e80.Use(middleware.Recover())
+	e80.Use(middleware.BodyLimit("4K"))
+	e80.HideBanner = true
+	go e80.Start(HOST + ":" + "80")
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt)
+	<-quit
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	e.Shutdown(ctx)
+	println("Main server shutdown!")
+	if e80 != nil {
+		println("Port 80 redirect shutdown!")
+		e80.Shutdown(ctx)
 	}
+
 }
+
